@@ -62,7 +62,7 @@ class PredictedSubtitle:
         self.sim_threshold = sim_threshold
 
         if self.frames:
-            self.text = max(self.frames, key=lambda f: f.confidence).text
+            self.text = max(self.frames, key=lambda f: f.confidence, default=None).text
         else:
             self.text = ''
 

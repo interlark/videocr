@@ -1,15 +1,19 @@
 from __future__ import annotations
-from typing import List
-import sys
-import multiprocessing
-import pytesseract
-import cv2
 
-from . import constants
-from . import utils
+import multiprocessing
+import subprocess
+import sys
+from functools import partial
+from itertools import islice
+from typing import Callable, List
+
+import cv2
+import pytesseract
+
+from . import constants, utils
 from .models import PredictedFrame, PredictedSubtitle
 from .opencv_adapter import Capture
-
+from tqdm import tqdm
 
 class Video:
     path: str
@@ -27,9 +31,11 @@ class Video:
             self.num_frames = int(v.get(cv2.CAP_PROP_FRAME_COUNT))
             self.fps = v.get(cv2.CAP_PROP_FPS)
             self.height = int(v.get(cv2.CAP_PROP_FRAME_HEIGHT))
-
+    
     def run_ocr(self, lang: str, time_start: str, time_end: str,
-                conf_threshold: int, use_fullframe: bool) -> None:
+                conf_threshold: int, use_fullframe: bool,
+                img_hook: Callable, take_every_nth_frame: int, processes: int) -> None:
+                 
         self.lang = lang
         self.use_fullframe = use_fullframe
 
@@ -40,19 +46,34 @@ class Video:
             raise ValueError('time_start is later than time_end')
         num_ocr_frames = ocr_end - ocr_start
 
+        
         # get frames from ocr_start to ocr_end
-        with Capture(self.path) as v, multiprocessing.Pool() as pool:
+        with Capture(self.path) as v, multiprocessing.Pool(processes) as pool:
             v.set(cv2.CAP_PROP_POS_FRAMES, ocr_start)
             frames = (v.read()[1] for _ in range(num_ocr_frames))
+            frames_filtred = islice(frames, None, None, take_every_nth_frame)
+            total_frames = self.num_frames // take_every_nth_frame
+            p_bar = tqdm(total = total_frames, desc='OCR')
 
             # perform ocr to frames in parallel
-            it_ocr = pool.imap(self._image_to_data, frames, chunksize=10)
-            self.pred_frames = [
-                PredictedFrame(i + ocr_start, data, conf_threshold)
-                for i, data in enumerate(it_ocr)
-            ]
+            image_to_data_hooked = partial(self._image_to_data, img_hook=img_hook)
+            it_ocr = pool.imap(image_to_data_hooked, frames_filtred, chunksize=20)
+            self.pred_frames = []
+            for i, data in enumerate(it_ocr):
+                pred_frame = PredictedFrame(i + ocr_start, data, conf_threshold)
+                self.pred_frames.append(pred_frame)
+                p_bar.update()
+            
+            p_bar.n = total_frames
+            p_bar.refresh()
 
-    def _image_to_data(self, img) -> str:
+    def _image_to_data(self, img, img_hook=None) -> str:
+        if img is None:
+            return ''
+        
+        if callable(img_hook):
+            img = img_hook(img)
+        
         if not self.use_fullframe:
             # only use bottom half of the frame by default
             img = img[self.height // 2:, :]
